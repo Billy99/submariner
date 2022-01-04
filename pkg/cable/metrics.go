@@ -19,6 +19,8 @@ limitations under the License.
 package cable
 
 import (
+	"crypto/sha256"
+	"encoding/base32"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -84,6 +86,22 @@ var (
 			connectionsStatusLabel,
 		},
 	)
+	privateConnectionsGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "submariner_connections_private",
+			Help: "Number of connections and corresponding status with private info hashed (by cable driver and cable)",
+		},
+		[]string{
+			cableDriverLabel,
+			localClusterLabel,
+			localHostnameLabel,
+			localEndpointIPLabel,
+			remoteClusterLabel,
+			remoteHostnameLabel,
+			remoteEndpointIPLabel,
+			connectionsStatusLabel,
+		},
+	)
 	connectionEstablishedTimestampGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "submariner_connection_established_timestamp",
@@ -117,7 +135,8 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(rxGauge, txGauge, connectionsGauge, connectionEstablishedTimestampGauge, connectionLatencySecondsGauge)
+	prometheus.MustRegister(rxGauge, txGauge, connectionsGauge, privateConnectionsGauge, connectionEstablishedTimestampGauge,
+		connectionLatencySecondsGauge)
 }
 
 func getLabels(cableDriverName string, localEndpoint, remoteEndpoint *submv1.EndpointSpec) prometheus.Labels {
@@ -129,6 +148,24 @@ func getLabels(cableDriverName string, localEndpoint, remoteEndpoint *submv1.End
 		remoteClusterLabel:    remoteEndpoint.ClusterID,
 		remoteHostnameLabel:   remoteEndpoint.Hostname,
 		remoteEndpointIPLabel: remoteEndpoint.PublicIP,
+	}
+}
+
+func getPrivateLabels(cableDriverName string, localEndpoint, remoteEndpoint *submv1.EndpointSpec) prometheus.Labels {
+	hashLocalPublicIP := sha256.Sum256([]byte(localEndpoint.PublicIP))
+	encodedLocalPublicIP := base32.StdEncoding.EncodeToString(hashLocalPublicIP[:])
+
+	hashRemotePublicIP := sha256.Sum256([]byte(remoteEndpoint.PublicIP))
+	encodedRemotePublicIP := base32.StdEncoding.EncodeToString(hashRemotePublicIP[:])
+
+	return prometheus.Labels{
+		cableDriverLabel:      cableDriverName,
+		localClusterLabel:     localEndpoint.ClusterID,
+		localHostnameLabel:    localEndpoint.Hostname,
+		localEndpointIPLabel:  encodedLocalPublicIP[:16],
+		remoteClusterLabel:    remoteEndpoint.ClusterID,
+		remoteHostnameLabel:   remoteEndpoint.Hostname,
+		remoteEndpointIPLabel: encodedRemotePublicIP[:16],
 	}
 }
 
@@ -146,6 +183,7 @@ func RecordConnectionLatency(cableDriverName string, localEndpoint, remoteEndpoi
 
 func RecordConnection(cableDriverName string, localEndpoint, remoteEndpoint *submv1.EndpointSpec, status string, isNew bool) {
 	labels := getLabels(cableDriverName, localEndpoint, remoteEndpoint)
+	privateLabels := getPrivateLabels(cableDriverName, localEndpoint, remoteEndpoint)
 
 	if isNew {
 		connectionEstablishedTimestampGauge.With(labels).Set(float64(time.Now().Unix()))
@@ -153,20 +191,26 @@ func RecordConnection(cableDriverName string, localEndpoint, remoteEndpoint *sub
 
 	labels[connectionsStatusLabel] = status
 	connectionsGauge.With(labels).Set(1)
+
+	privateLabels[connectionsStatusLabel] = status
+	privateConnectionsGauge.With(privateLabels).Set(1)
 }
 
 func RecordDisconnected(cableDriverName string, localEndpoint, remoteEndpoint *submv1.EndpointSpec) {
 	labels := getLabels(cableDriverName, localEndpoint, remoteEndpoint)
+	privateLabels := getPrivateLabels(cableDriverName, localEndpoint, remoteEndpoint)
 
 	connectionLatencySecondsGauge.Delete(labels)
 	connectionEstablishedTimestampGauge.Delete(labels)
 	rxGauge.Delete(labels)
 	txGauge.Delete(labels)
 	connectionsGauge.Delete(labels)
+	privateConnectionsGauge.Delete(privateLabels)
 }
 
 func RecordNoConnections() {
 	// TODO: assuming only 1 cable driver is active at a time, calling Reset() will work.
 	// once this is changed, there is a need to be updated accordingly
 	connectionsGauge.Reset()
+	privateConnectionsGauge.Reset()
 }
